@@ -508,7 +508,6 @@ async function saveSession(sessionId, sessionPath, force = false) {
 
                     data[file] = content;
                 } catch (_) {
-                 .
                 }
             }
 
