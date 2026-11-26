@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Nexa — Admin</title>
+<link rel="icon" type="image/svg+xml" href="/nexa-logo.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/nexa.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="/admin-config.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand">Nexa · Admin</div>
+    <div id="userBar" class="row hidden">
+      <span id="who" class="muted" style="font-size:13px"></span>
+      <button id="logout" class="btn ghost sm">Sign out</button>
+    </div>
+  </header>
+
+  <section id="login" class="card" style="max-width:420px;margin:70px auto">
+    <h2 style="font-weight:300;margin:0 0 6px">Sign in</h2>
+    <p class="muted" style="margin:0;font-size:14px">Admin and owner accounts only.</p>
+    <label for="email">Email</label>
+    <input id="email" class="input" type="email" autocomplete="username">
+    <label for="password">Password</label>
+    <input id="password" class="input" type="password" autocomplete="current-password">
+    <div class="row" style="margin-top:20px"><button id="loginBtn" class="btn">Sign in</button></div>
+    <div id="loginError" class="err"></div>
+  </section>
+
+  <div id="app" class="hidden">
+    <nav id="tabs" class="tabs"></nav>
+    <div id="notice" class="err"></div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (d) => (d ? new Date(d).toLocaleString() : '—');
+const pill = (text, on) => `<span class="pill ${on ? 'on' : 'off'}">${esc(text)}</span>`;
+const stat = (label, value) => `<div class="card"><div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.08em">${esc(label)}</div><div class="stat">${esc(value)}</div></div>`;
+const table = (headers, rows) => `<div class="scroll"><table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${
+  rows.length ? rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')
+  : `<tr><td colspan="${headers.length}" class="muted">Nothing here yet.</td></tr>`}</tbody></table></div>`;
+
+const TABS = [['overview', 'Overview'], ['developers', 'Developers'], ['users', 'Users'], ['commands', 'Commands'], ['settings', 'Settings'], ['broadcast', 'Broadcast'], ['logs', 'Logs']];
+let sb = null, token = null, current = 'overview';
+
+function notice(msg, ok = false) {
+  const n = $('notice');
+  n.textContent = msg;
+  n.className = ok ? 'ok' : 'err';
+  if (msg) setTimeout(() => { if (n.textContent === msg) n.textContent = ''; }, 4000);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api/admin' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(opts.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+  return body;
+}
+
+async function login() {
+  $('loginError').textContent = '';
+  try {
+    if (!window.ADMIN_SUPABASE_URL || !window.ADMIN_SUPABASE_ANON_KEY) throw new Error('Server is missing ADMIN_SUPABASE_URL / ADMIN_SUPABASE_ANON_KEY');
+    sb = window.supabase.createClient(window.ADMIN_SUPABASE_URL, window.ADMIN_SUPABASE_ANON_KEY);
+    const { data, error } = await sb.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+    if (error) throw error;
+    token = data.session.access_token;
+    $('password').value = '';
+    const me = await api('/me');
+    $('who').textContent = `${me.user.display_name || me.user.email} · ${me.user.role}`;
+    $('login').classList.add('hidden');
+    $('app').classList.remove('hidden');
+    $('userBar').classList.remove('hidden');
+    $('tabs').innerHTML = TABS.map(([k, l]) => `<button class="tab" data-tab="${k}">${l}</button>`).join('');
+    show('overview');
+  } catch (e) {
+    $('loginError').textContent = e.message;
+  }
+}
+
+async function show(name) {
+  current = name;
+  document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  $('content').innerHTML = '<p class="muted">Loading…</p>';
+  try { await RENDER[name](); }
+  catch (e) { $('content').innerHTML = ''; notice(e.message); }
+}
+
+async function renderOverview() {
+  const d = await api('/overview');
+  const connected = Object.values(d.runtime || {}).filter(Boolean).length;
+  $('content').innerHTML = `
+    <div class="grid g2">${stat('Users', d.users.length)}${stat('Sessions', d.sessions.length)}${stat('Connected', connected)}${stat('Commands', d.commands.length)}</div>
+    <div class="card" style="margin-top:16px"><h3 class="sec">Sessions</h3>${table(
+      ['Session', 'Phone', 'Status', 'Updated', ''],
+      d.sessions.map((s) => [
+        esc(s.session_id), esc(s.phone_number || '—'), pill(s.status, s.status === 'connected'), fmt(s.updated_at),
+        `<button class="btn danger sm" data-action="deactivate" data-id="${esc(s.session_id)}">Deactivate</button>`,
+      ]))}</div>`;
+}
+
+async function renderDevelopers() {
+  const { developers } = await api('/developers');
+  $('content').innerHTML = `
+    <div class="card"><h3 class="sec">New developer</h3>
+      <div class="row">
+        <input id="devName" class="input" placeholder="Name" style="max-width:260px">
+        <input id="devEmail" class="input" placeholder="Email (optional)" style="max-width:300px">
+        <button id="devCreate" class="btn">Create</button>
+      </div></div>
+    <div class="card" style="margin-top:16px"><h3 class="sec">Developers</h3>${table(
+      ['Name', 'Email', 'Active', 'Created', ''],
+      developers.map((d) => [
+        esc(d.name), esc(d.email || '—'),
+        `<input type="checkbox" data-patch="/developers/${esc(d.id)}/active" data-field="is_active" ${d.is_active ? 'checked' : ''}>`,
+        fmt(d.created_at),
+        `<button class="btn ghost sm" data-action="keys" data-id="${esc(d.id)}">Keys</button>`,
+      ]))}</div>
+    <div id="devKeys"></div>`;
+  $('devCreate').onclick = async () => {
+    try {
+      await api('/developers', { method: 'POST', body: JSON.stringify({ name: $('devName').value, email: $('devEmail').value }) });
+      notice('Developer created', true);
+      renderDevelopers();
+    } catch (e) { notice(e.message); }
+  };
+}
+
+async function loadKeys(devId) {
+  const { keys } = await api(`/developers/${devId}/keys`);
+  $('devKeys').innerHTML = `
+    <div class="card" style="margin-top:16px">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <h3 class="sec" style="margin:0">Keys</h3>
+        <div class="row">
+          <input id="keyDays" class="input" type="number" value="30" min="1" max="365" style="width:90px">
+          <span class="muted" style="font-size:13px">days</span>
+          <button class="btn sm" data-action="genkey" data-id="${esc(devId)}">Generate key</button>
+        </div>
+      </div>
+      ${table(['Prefix', 'Expires', 'Last used', 'Status', ''], keys.map((k) => {
+        const expired = new Date(k.expires_at) <= new Date();
+        const status = k.revoked_at ? pill('revoked', false) : expired ? pill('expired', false) : pill('active', true);
+        return [
+          esc(k.key_prefix) + '…', fmt(k.expires_at), fmt(k.last_used_at), status,
+          k.revoked_at ? '' : `<button class="btn danger sm" data-action="revoke" data-id="${esc(k.id)}" data-dev="${esc(devId)}">Revoke</button>`,
+        ];
+      }))}
+    </div>`;
+}
+
+function showKeyModal(key, expires) {
+  const m = document.createElement('div');
+  m.className = 'modal';
+  m.innerHTML = `<div class="card">
+    <h3 class="sec">Developer key</h3>
+    <p class="muted" style="font-size:14px;margin-top:0">Copy it now. It will not be shown again. Expires ${esc(fmt(expires))}.</p>
+    <div class="code" id="keyText"></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn ghost sm" id="copyKey">Copy</button>
+      <button class="btn sm" id="closeKey">Done</button>
+    </div></div>`;
+  m.querySelector('#keyText').textContent = key;
+  document.body.appendChild(m);
+  m.querySelector('#copyKey').onclick = () => navigator.clipboard?.writeText(key).then(() => notice('Copied', true));
+  m.querySelector('#closeKey').onclick = () => m.remove();
+}
+
+async function renderUsers() {
+  const d = await api('/overview');
+  $('content').innerHTML = `<div class="card"><h3 class="sec">Panel users</h3>${table(
+    ['Name', 'Role', 'Active', 'Created'],
+    d.users.map((u) => [
+      esc(u.display_name || '—'),
+      `<select data-patch="/users/${esc(u.id)}" data-field="role">${['user', 'admin', 'owner'].map((r) => `<option ${r === u.role ? 'selected' : ''}>${r}</option>`).join('')}</select>`,
+      `<input type="checkbox" data-patch="/users/${esc(u.id)}" data-field="is_active" ${u.is_active ? 'checked' : ''}>`,
+      fmt(u.created_at),
+    ]))}</div>`;
+}
+
+async function renderCommands() {
+  const d = await api('/overview');
+  const box = (id, f, v) => `<input type="checkbox" data-patch="/commands/${esc(id)}" data-field="${f}" ${v ? 'checked' : ''}>`;
+  $('content').innerHTML = `<div class="card"><h3 class="sec">Commands</h3>${table(
+    ['Command', 'Category', 'Enabled', 'Admin only', 'Owner only'],
+    d.commands.map((c) => [esc(c.command_name), esc(c.category || 'misc'), box(c.id, 'is_enabled', c.is_enabled), box(c.id, 'admin_only', c.admin_only), box(c.id, 'owner_only', c.owner_only)]),
+  )}</div>`;
+}
+
+async function renderSettings() {
+  const { settings, runtime } = await api('/settings');
+  const get = (k) => { const row = settings.find((s) => s.setting_key === k); return row ? row.setting_value : (runtime || {})[k]; };
+  const bool = (k) => `<select id="s_${k}" class="input">${[true, false].map((v) => `<option value="${v}" ${get(k) === v ? 'selected' : ''}>${v ? 'On' : 'Off'}</option>`).join('')}</select>`;
+  $('content').innerHTML = `
+    <div class="card"><h3 class="sec">Global defaults</h3>
+      <p class="muted" style="font-size:14px;margin-top:0">Each developer's number can override these from their own panel.</p>
+      <label>Prefix</label><input id="s_PREFIX" class="input" value="${esc(get('PREFIX') ?? '!')}" style="max-width:200px">
+      <label>Auto read status</label>${bool('AUTO_READ_STATUS')}
+      <label>Auto react</label>${bool('AUTO_REACT')}
+      <label>Auto typing</label>${bool('AUTO_TYPING')}
+      <label>React emojis (comma separated)</label>
+      <input id="s_REACT_EMOJIS" class="input" value="${esc((get('REACT_EMOJIS') || []).join(', '))}">
+      <div class="row" style="margin-top:20px"><button id="saveSettings" class="btn">Save</button></div>
+    </div>`;
+  $('saveSettings').onclick = async () => {
+    try {
+      await api('/settings', { method: 'PUT', body: JSON.stringify({
+        PREFIX: $('s_PREFIX').value,
+        AUTO_READ_STATUS: $('s_AUTO_READ_STATUS').value === 'true',
+        AUTO_REACT: $('s_AUTO_REACT').value === 'true',
+        AUTO_TYPING: $('s_AUTO_TYPING').value === 'true',
+        REACT_EMOJIS: $('s_REACT_EMOJIS').value.split(',').map((s) => s.trim()).filter(Boolean),
+      }) });
+      notice('Settings saved', true);
+    } catch (e) { notice(e.message); }
+  };
+}
+
+async function renderBroadcast() {
+  const [d, b] = await Promise.all([api('/overview'), api('/broadcasts')]);
+  const opts = d.sessions.map((s) => `<option value="${esc(s.session_id)}">${esc(s.phone_number || s.session_id)} · ${esc(s.status)}</option>`).join('');
+  $('content').innerHTML = `
+    <div class="card"><h3 class="sec">Send update</h3>
+      <label>Session</label>
+      <select id="bSession" class="input">${opts || '<option value="">No sessions</option>'}</select>
+      <label>Message</label>
+      <textarea id="bMsg" class="input" rows="5" maxlength="4000" placeholder="Update message…"></textarea>
+      <label style="text-transform:none;letter-spacing:0;color:var(--fg);font-size:14px;display:flex;gap:8px;align-items:center">
+        <input type="checkbox" id="bConfirm"> I confirm this goes to that session's contacts only.
+      </label>
+      <div class="row" style="margin-top:18px"><button id="bSend" class="btn">Queue broadcast</button></div>
+    </div>
+    <div class="card" style="margin-top:16px"><h3 class="sec">Recent</h3>${table(
+      ['Created', 'Status', 'Sent', 'Failed', 'Total', ''],
+      b.broadcasts.map((x) => [
+        fmt(x.created_at), pill(x.status, x.status === 'done'), esc(x.sent), esc(x.failed), esc(x.total),
+        ['queued', 'running'].includes(x.status) ? `<button class="btn danger sm" data-action="cancel-broadcast" data-id="${esc(x.id)}">Cancel</button>` : '',
+      ]))}</div>`;
+  $('bSend').onclick = async () => {
+    const message = $('bMsg').value.trim();
+    if (!$('bConfirm').checked) return notice('Tick the confirmation box first');
+    if (!confirm('Queue this message for the selected session?\n\n' + message)) return;
+    try {
+      await api('/broadcasts', { method: 'POST', body: JSON.stringify({ session_id: $('bSession').value, message, confirm: true }) });
+      notice('Broadcast queued', true);
+      renderBroadcast();
+    } catch (e) { notice(e.message); }
+  };
+}
+
+async function renderLogs() {
+  const d = await api('/overview');
+  $('content').innerHTML = `<div class="card"><h3 class="sec">Recent commands</h3>${table(
+    ['Time', 'Command', 'Chat', 'Result'],
+    d.logs.map((l) => [fmt(l.executed_at), esc(l.command_name), esc(l.chat_jid || '—'), l.succeeded ? pill('ok', true) : pill(l.error_message || 'failed', false)]),
+  )}</div>`;
+}
+
+const RENDER = { overview: renderOverview, developers: renderDevelopers, users: renderUsers, commands: renderCommands, settings: renderSettings, broadcast: renderBroadcast, logs: renderLogs };
+
+document.addEventListener('click', async (e) => {
+  const tab = e.target.closest('.tab');
+  if (tab) return show(tab.dataset.tab);
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const { action, id, dev } = el.dataset;
+  try {
+    if (action === 'deactivate') {
+      if (!confirm('Deactivate this number? Its bot goes offline and will not reconnect.')) return;
+      await api(`/sessions/${id}/deactivate`, { method: 'POST' });
+      notice('Session deactivated', true);
+      return show('overview');
+    }
+    if (action === 'keys') return loadKeys(id);
+    if (action === 'genkey') {
+      const days = Number($('keyDays').value) || 30;
+      const r = await api(`/developers/${id}/keys`, { method: 'POST', body: JSON.stringify({ days }) });
+      showKeyModal(r.key, r.meta.expires_at);
+      return loadKeys(id);
+    }
+    if (action === 'revoke') {
+      if (!confirm('Revoke this key? It stops working immediately.')) return;
+      await api(`/keys/${id}/revoke`, { method: 'POST' });
+      notice('Key revoked', true);
+      return loadKeys(dev);
+    }
+    if (action === 'cancel-broadcast') {
+      await api(`/broadcasts/${id}/cancel`, { method: 'POST' });
+      notice('Broadcast cancelled', true);
+      return renderBroadcast();
+    }
+  } catch (err) { notice(err.message); }
+});
+
+document.addEventListener('change', async (e) => {
+  const el = e.target.closest('[data-patch]');
+  if (!el) return;
+  const value = el.type === 'checkbox' ? el.checked : el.value;
+  try {
+    await api(el.dataset.patch, { method: 'PUT', body: JSON.stringify({ [el.dataset.field]: value }) });
+    notice('Saved', true);
+  } catch (err) { notice(err.message); }
+});
+
+$('loginBtn').onclick = login;
+$('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+$('logout').onclick = async () => { try { await sb?.auth.signOut(); } catch (_) {} location.reload(); };
+</script>
+</body>
+</html>

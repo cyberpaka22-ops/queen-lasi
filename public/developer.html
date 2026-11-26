@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Nexa — Developer</title>
+<link rel="icon" type="image/svg+xml" href="/nexa-logo.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/nexa.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand">Nexa · Developer</div>
+    <div id="userBar" class="row hidden">
+      <button id="revokeKey" class="btn danger sm">Revoke my key</button>
+      <button id="signOut" class="btn ghost sm">Sign out</button>
+    </div>
+  </header>
+
+  <section id="login" class="card" style="max-width:460px;margin:70px auto">
+    <h2 style="font-weight:300;margin:0 0 6px">Developer access</h2>
+    <p class="muted" style="margin:0;font-size:14px;line-height:1.6">Paste the key your Nexa admin gave you. It stays in memory only and is cleared when you leave the page.</p>
+    <label for="key">Developer key</label>
+    <input id="key" class="input" type="password" autocomplete="off" spellcheck="false" placeholder="nxd_…">
+    <div class="row" style="margin-top:20px"><button id="connect" class="btn">Continue</button></div>
+    <div id="loginErr" class="err"></div>
+  </section>
+
+  <div id="panel" class="hidden">
+    <div id="notice" class="err"></div>
+    <h3 class="sec" style="margin-top:20px">Your numbers</h3>
+    <div class="grid g2" id="sessionList"></div>
+
+    <div id="detail" class="hidden" style="margin-top:28px">
+      <div class="row" style="justify-content:space-between;margin-bottom:6px">
+        <h2 id="detailTitle" style="font-weight:300;margin:0"></h2>
+        <button id="deactivate" class="btn danger sm">Deactivate number</button>
+      </div>
+      <div class="grid g-two" style="margin-top:16px">
+        <div class="card">
+          <h3 class="sec">Bot settings</h3>
+          <div id="settingsForm"></div>
+          <div class="row" style="margin-top:18px"><button id="saveSettings" class="btn">Save settings</button></div>
+        </div>
+        <div class="grid" style="align-content:start">
+          <div class="card">
+            <h3 class="sec">Send update</h3>
+            <textarea id="bMsg" class="input" rows="4" maxlength="4000" placeholder="Message to this number's contacts"></textarea>
+            <div class="row" style="margin-top:12px"><button id="bSend" class="btn">Queue broadcast</button></div>
+            <h3 class="sec" style="margin-top:22px">Recent</h3>
+            <div id="bcastList"></div>
+          </div>
+          <div class="card">
+            <h3 class="sec">Contacts</h3>
+            <div id="contacts"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (d) => (d ? new Date(d).toLocaleString() : '—');
+const pill = (text, on) => `<span class="pill ${on ? 'on' : 'off'}">${esc(text)}</span>`;
+const LABELS = { BOT_NAME: 'Bot name', PREFIX: 'Command prefix', AUTO_ONLINE: 'Always online', AUTO_READ_STATUS: 'Auto view status', AUTO_REACT: 'Auto react', AUTO_REACT_CHANCE: 'React chance (0–1)', AUTO_TYPING: 'Auto typing', AUTO_WELCOME: 'Welcome messages', AUTO_GOODBYE: 'Goodbye messages', WELCOME_MESSAGE: 'Welcome text', GOODBYE_MESSAGE: 'Goodbye text', COMMANDS_OWNER_ONLY: 'Only owner can use commands', AUTO_FOLLOW_CHANNELS: 'Auto follow channels', CHANNELS: 'Channel JIDs (comma separated)' };
+
+let key = null, sessions = [], open = null;
+
+async function dev(path, opts = {}) {
+  const res = await fetch('/api/dev' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key, ...(opts.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+  return body;
+}
+
+function notice(msg, ok = false) {
+  const n = $('notice');
+  n.textContent = msg;
+  n.className = ok ? 'ok' : 'err';
+  if (msg) setTimeout(() => { if (n.textContent === msg) n.textContent = ''; }, 4000);
+}
+
+function field(k, type, value, def) {
+  const v = value ?? def;
+  const label = `<label>${esc(LABELS[k] || k)}</label>`;
+  if (type === 'boolean') {
+    return label + `<select class="input" data-key="${k}" data-type="boolean" data-orig="${v}">
+      <option value="true" ${v === true ? 'selected' : ''}>On</option>
+      <option value="false" ${v === false ? 'selected' : ''}>Off</option></select>`;
+  }
+  const str = type === 'array' ? (v || []).join(', ') : String(v ?? '');
+  return label + `<input class="input" ${type === 'number' ? 'type="number" step="0.05" min="0" max="1"' : ''}
+    data-key="${k}" data-type="${type}" data-orig="${esc(str)}" value="${esc(str)}">`;
+}
+
+async function loadSessions() {
+  const d = await dev('/sessions');
+  sessions = d.sessions;
+  $('sessionList').innerHTML = sessions.length
+    ? sessions.map((s) => `<button class="card session-card" data-open="${esc(s.session_id)}">
+        <div style="font-weight:500;font-size:17px">${esc(s.phone_number || s.session_id)}</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">${esc(s.session_id)}</div>
+        <div style="margin-top:12px">${pill(s.status, s.status === 'connected')}${s.is_active ? '' : ' ' + pill('deactivated', false)}</div>
+      </button>`).join('')
+    : '<p class="muted">No numbers are assigned to this key yet.</p>';
+}
+
+async function openSession(id) {
+  open = sessions.find((s) => s.session_id === id);
+  const [cfg, contacts, bc] = await Promise.all([
+    dev(`/sessions/${id}/settings`), dev(`/sessions/${id}/contacts`), dev(`/sessions/${id}/broadcasts`),
+  ]);
+  $('detail').classList.remove('hidden');
+  $('detailTitle').textContent = open.phone_number || open.session_id;
+  $('settingsForm').innerHTML = Object.entries(cfg.allowed).map(([k, type]) =>
+    field(k, type, cfg.settings[k], cfg.defaults[k])).join('');
+  $('contacts').innerHTML = contacts.contacts.length
+    ? `<div class="scroll"><table><thead><tr><th>Number</th><th>Last seen</th></tr></thead><tbody>${
+        contacts.contacts.map((c) => `<tr><td>${esc(c.whatsapp_jid.split('@')[0])}</td><td class="muted">${fmt(c.last_seen_at)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted" style="margin:0">No contacts yet.</p>';
+  $('bcastList').innerHTML = bc.broadcasts.length
+    ? bc.broadcasts.map((b) => `<div style="border-top:1px solid var(--line);padding:10px 0;font-size:14px">
+        <div>${pill(b.status, b.status === 'done')} <span class="muted">${esc(b.sent)} sent · ${esc(b.failed)} failed / ${esc(b.total)}</span></div>
+        <div class="muted" style="margin-top:6px">${esc(b.message.slice(0, 120))}</div>
+        ${['queued', 'running'].includes(b.status) ? `<button class="btn danger sm" style="margin-top:8px" data-cancel="${esc(b.id)}">Cancel</button>` : ''}
+      </div>`).join('')
+    : '<p class="muted" style="margin:0">No broadcasts yet.</p>';
+  $('detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function saveSettings() {
+  const body = {};
+  document.querySelectorAll('#settingsForm [data-key]').forEach((el) => {
+    if (el.value === el.dataset.orig) return;            // වෙනස් වුණ ඒවා විතරයි යවන්නේ
+    const t = el.dataset.type;
+    let v = el.value;
+    if (t === 'boolean') v = v === 'true';
+    else if (t === 'number') v = Number(v);
+    else if (t === 'array') v = v.split(',').map((s) => s.trim()).filter(Boolean);
+    body[el.dataset.key] = v;
+  });
+  if (!Object.keys(body).length) return notice('Nothing changed');
+  await dev(`/sessions/${open.session_id}/settings`, { method: 'PUT', body: JSON.stringify(body) });
+  notice('Settings saved', true);
+  openSession(open.session_id);
+}
+
+function signedIn(on) {
+  $('login').classList.toggle('hidden', on);
+  $('panel').classList.toggle('hidden', !on);
+  $('userBar').classList.toggle('hidden', !on);
+}
+
+$('connect').onclick = async () => {
+  const k = $('key').value.trim();
+  if (!k) return;
+  key = k;
+  $('key').value = '';
+  $('loginErr').textContent = '';
+  try {
+    await loadSessions();
+    signedIn(true);
+  } catch (e) {
+    key = null;
+    $('loginErr').textContent = e.message;
+  }
+};
+$('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('connect').click(); });
+
+$('sessionList').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-open]');
+  if (b) openSession(b.dataset.open).catch((err) => notice(err.message));
+});
+
+$('saveSettings').onclick = () => saveSettings().catch((e) => notice(e.message));
+
+$('bSend').onclick = async () => {
+  const message = $('bMsg').value.trim();
+  if (!open || !message) return notice('Write a message first');
+  if (!confirm('Send this to all contacts of this number?\n\n' + message)) return;
+  try {
+    await dev(`/sessions/${open.session_id}/broadcasts`, { method: 'POST', body: JSON.stringify({ message, confirm: true }) });
+    $('bMsg').value = '';
+    notice('Broadcast queued', true);
+    openSession(open.session_id);
+  } catch (e) { notice(e.message); }
+};
+
+$('bcastList').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-cancel]');
+  if (!b) return;
+  try { await dev(`/broadcasts/${b.dataset.cancel}/cancel`, { method: 'POST' }); notice('Cancelled', true); openSession(open.session_id); }
+  catch (err) { notice(err.message); }
+});
+
+$('deactivate').onclick = async () => {
+  if (!open || !confirm('Deactivate this number? Its bot goes offline and will not reconnect.')) return;
+  try {
+    await dev(`/sessions/${open.session_id}/deactivate`, { method: 'POST' });
+    notice('Deactivated', true);
+    $('detail').classList.add('hidden');
+    await loadSessions();
+  } catch (e) { notice(e.message); }
+};
+
+$('revokeKey').onclick = async () => {
+  if (!confirm('Revoke your key? You will be signed out and need a new key.')) return;
+  try { await dev('/keys/revoke-current', { method: 'POST' }); } catch (_) {}
+  signOut();
+};
+
+function signOut() {
+  key = null; open = null; sessions = [];
+  $('sessionList').innerHTML = '';
+  $('detail').classList.add('hidden');
+  signedIn(false);
+}
+$('signOut').onclick = signOut;
+</script>
+</body>
+</html>

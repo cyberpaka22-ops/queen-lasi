@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="si">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>My Bot Panel</title>
+<link rel="stylesheet" href="/panel.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">✦ My Bot Panel</div>
+    <button id="logout" class="btn ghost sm hidden">Logout</button>
+  </div>
+
+  <!-- CODE LOGIN -->
+  <section id="auth" class="login">
+    <div class="hero"><h1>Panel Login</h1><p class="muted">Pairing වෙලාවේ ලැබුණු panel code එක දාන්න.</p></div>
+    <div class="glass">
+      <form id="codeForm">
+        <label for="code">Panel code</label>
+        <input class="input" id="code" placeholder="NEXA-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" required>
+        <div style="margin-top:20px"><button class="btn" id="loginBtn" type="submit" style="width:100%">Open my panel</button></div>
+        <div id="authErr" class="err"></div>
+      </form>
+    </div>
+  </section>
+
+  <!-- DASHBOARD -->
+  <section id="app" class="hidden">
+    <div class="glass" id="detail"></div>
+  </section>
+</div>
+
+<div id="confirmModal" class="modal hidden">
+  <div class="glass">
+    <h3 style="margin-top:0">Bot එක delete කරන්නද?</h3>
+    <p class="muted">WhatsApp connection කැපෙනවා, settings සහ session data මැකෙනවා. ආපහු ගන්න බැහැ.</p>
+    <label for="confirmInput">Session id එක මෙතනට type කරන්න</label>
+    <input class="input" id="confirmInput" autocomplete="off">
+    <div style="display:flex;gap:10px;margin-top:18px">
+      <button class="btn ghost" id="cancelDelete">Cancel</button>
+      <button class="btn danger" id="confirmDelete" disabled>Delete</button>
+    </div>
+    <div id="deleteErr" class="err"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = 'nexa_panel_token';
+let session = null, allowed = {};
+
+function el(tag, props = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') n.className = v; else if (k === 'text') n.textContent = v; else n[k] = v;
+  }
+  kids.forEach((k) => n.append(k));
+  return n;
+}
+
+async function api(path, opts = {}) {
+  const token = localStorage.getItem(TOKEN_KEY) || '';
+  const res = await fetch('/api/user' + path, {
+    method: opts.method || 'GET',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const json = await res.json().catch(() => ({}));
+  if (res.status === 401) { logout(true); throw new Error(json.error || 'Login expired'); }
+  if (!res.ok) throw new Error(json.error || 'Request failed');
+  return json;
+}
+
+// ---------- login ----------
+$('codeForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('authErr').textContent = '';
+  $('loginBtn').disabled = true;
+  try {
+    const res = await fetch('/api/user/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: $('code').value }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || 'Login failed');
+    localStorage.setItem(TOKEN_KEY, json.token);
+    $('code').value = '';
+    await showPanel();
+  } catch (err) {
+    $('authErr').textContent = err.message;
+  } finally {
+    $('loginBtn').disabled = false;
+  }
+};
+
+async function logout(silent) {
+  try { if (!silent) await api('/logout', { method: 'POST' }); } catch (_) {}
+  localStorage.removeItem(TOKEN_KEY);
+  $('auth').classList.remove('hidden');
+  $('app').classList.add('hidden');
+  $('logout').classList.add('hidden');
+}
+$('logout').onclick = () => logout(false);
+
+// ---------- panel ----------
+async function showPanel() {
+  const data = await api('/session');
+  session = data.session;
+  const cfg = await api('/settings');
+  allowed = cfg.allowed;
+  $('auth').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('logout').classList.remove('hidden');
+  renderDetail(cfg);
+}
+
+function renderDetail(cfg) {
+  const d = $('detail');
+  d.replaceChildren();
+  const merged = { ...cfg.defaults, ...cfg.settings };
+  const online = session.status === 'connected' && session.is_active;
+
+  d.append(el('div', { style: 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px' },
+    el('div', {},
+      el('div', { text: 'My bot', style: 'font-size:24px;font-weight:800' }),
+      el('div', { class: 'muted', text: session.phone_number ? '+' + session.phone_number : session.session_id })),
+    el('span', { class: 'pill ' + (online ? 'on' : 'off'), text: online ? 'Online' : (session.status || 'offline') })));
+
+  const form = el('form', {});
+  const general = el('div', { class: 'field-grid' });
+  for (const key of ['BOT_NAME', 'PREFIX', 'WELCOME_MESSAGE', 'GOODBYE_MESSAGE', 'AUTO_REACT_CHANCE']) {
+    if (!(key in allowed)) continue;
+    const isNum = allowed[key] === 'number';
+    const input = el('input', { class: 'input', name: key, value: merged[key] ?? '', type: isNum ? 'number' : 'text' });
+    if (isNum) { input.step = '0.05'; input.min = '0'; input.max = '1'; }
+    general.append(el('div', {}, el('label', { text: key }), input));
+  }
+  form.append(el('div', { class: 'sec-title', text: 'General' }), general);
+
+  form.append(el('div', { class: 'sec-title', text: 'Features' }));
+  for (const [key, type] of Object.entries(allowed)) {
+    if (type !== 'boolean') continue;
+    const cb = el('input', { type: 'checkbox', name: key, checked: !!merged[key] });
+    form.append(el('label', { class: 'toggle', style: 'text-transform:none;letter-spacing:0;color:var(--fg);font-size:15px;margin:0' },
+      el('span', { text: key.replaceAll('_', ' ').toLowerCase() }), cb));
+  }
+
+  const save = el('button', { class: 'btn', type: 'submit', text: 'Save changes' });
+  const status = el('div', { class: 'err' });
+  form.append(el('div', { style: 'margin-top:20px' }, save), status);
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = {};
+    for (const [key, type] of Object.entries(allowed)) {
+      const input = form.elements[key];
+      if (!input || type === 'array') continue;
+      body[key] = type === 'boolean' ? input.checked : type === 'number' ? Number(input.value) : input.value;
+    }
+    save.disabled = true; status.className = 'ok'; status.textContent = 'Saving...';
+    try {
+      await api('/settings', { method: 'PUT', body });
+      status.textContent = 'Saved ✓';
+    } catch (err) {
+      status.className = 'err'; status.textContent = err.message;
+    } finally { save.disabled = false; }
+  };
+  d.append(form);
+
+  // Panel code අලුත් කරන්න
+  const newCode = el('div', { class: 'err' });
+  const regen = el('button', { class: 'btn ghost sm', type: 'button', text: 'Get new panel code', onclick: async () => {
+    if (!confirm('අලුත් code එක ගත්තම පරණ එක වැඩ කරන්නේ නැහැ. ගන්නද?')) return;
+    try {
+      const { code } = await api('/regenerate-code', { method: 'POST' });
+      newCode.className = 'ok';
+      newCode.textContent = 'අලුත් code: ' + code + ' (මේක ආපහු පෙන්වන්නේ නැහැ, save කරගන්න)';
+    } catch (err) { newCode.className = 'err'; newCode.textContent = err.message; }
+  }});
+  d.append(el('div', { class: 'sec-title', text: 'Panel access' }),
+    el('p', { class: 'muted', text: 'Panel එකට login වෙන්න code එක. Code එක හෙළි කරන්න එපා.' }), regen, newCode);
+
+  d.append(el('div', { class: 'danger-zone' },
+    el('div', { text: 'Danger zone', style: 'font-weight:700;color:var(--danger)' }),
+    el('p', { class: 'muted', text: 'මේ bot session එක permanently delete කරන්න.' }),
+    el('button', { class: 'btn danger sm', text: 'Delete bot', onclick: openDelete })));
+}
+
+// ---------- delete ----------
+function openDelete() {
+  $('confirmInput').value = '';
+  $('confirmDelete').disabled = true;
+  $('deleteErr').textContent = '';
+  $('confirmModal').classList.remove('hidden');
+}
+$('confirmInput').oninput = () => {
+  $('confirmDelete').disabled = $('confirmInput').value.trim() !== session?.session_id;
+};
+$('cancelDelete').onclick = () => $('confirmModal').classList.add('hidden');
+$('confirmDelete').onclick = async () => {
+  try {
+    await api('/session', { method: 'DELETE', body: { confirm: $('confirmInput').value.trim() } });
+    $('confirmModal').classList.add('hidden');
+    localStorage.removeItem(TOKEN_KEY);
+    $('detail').replaceChildren(el('p', { class: 'muted', text: 'Bot deleted.' }));
+    $('logout').classList.add('hidden');
+  } catch (err) { $('deleteErr').textContent = err.message; }
+};
+
+// Page load: token තියෙනවා නම් ඒ panel එකම ආපහු open කරනවා
+if (localStorage.getItem(TOKEN_KEY)) showPanel().catch(() => logout(true));
+</script>
+</body>
+</html>
